@@ -464,6 +464,7 @@ pub async fn agent_login(
         let mut child = command
             .spawn()
             .map_err(|e| format!("could not start the sign-in: {e}"))?;
+        crate::proc::adopt(child.id());
         let pgid = child.id() as i32;
         let _ = pgid_tx.send(pgid);
         let handle = app.state::<Logins>();

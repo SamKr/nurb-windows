@@ -246,6 +246,7 @@ fn spawn_server(
     let process = command
         .spawn()
         .map_err(|e| format!("could not start nurb dev: {e}"))?;
+    crate::proc::adopt(process.id());
     Ok(Arc::new(ProjectServer {
         child: Mutex::new(ManagedChild {
             process,

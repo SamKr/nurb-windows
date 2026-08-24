@@ -295,6 +295,7 @@ fn probe_output(
             return Err(format!("it did not start: {e}"));
         }
     };
+    crate::proc::adopt(child.id());
     let pgid = child.id() as i32;
     let deadline = Instant::now() + timeout;
     // Ok(()) ran clean, Err(Some(status)) exited badly, Err(None) timed out.
@@ -682,6 +683,7 @@ fn run_step(
     let mut child = command
         .spawn()
         .map_err(|e| format!("could not start {what}: {e}"))?;
+    crate::proc::adopt(child.id());
     let pgid = child.id() as i32;
     *provisioner.pgid.lock().unwrap() = Some(pgid);
     // A shutdown can land between the check above and the spawn; now that the

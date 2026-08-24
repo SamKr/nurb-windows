@@ -50,6 +50,7 @@ pub async fn authenticate(
     }
     let agent = AcpAgent::new(config);
     let (stdin, stdout, stderr, mut child) = agent.spawn_process().map_err(|e| e.to_string())?;
+    crate::proc::adopt(child.id());
     drain_stderr(kind, stderr);
     let method = method.to_string();
     let login = Client.builder().connect_with(
@@ -262,6 +263,7 @@ async fn agent_sessions(
     let (stdin, stdout, stderr, child) = agent
         .spawn_process()
         .map_err(|error| friendly(kind, error))?;
+    crate::proc::adopt(child.id());
     let pgid = child.id() as i32;
     drain_stderr(kind, stderr);
     let listed = tokio::time::timeout(
@@ -706,6 +708,7 @@ async fn run_chat(
             return;
         }
     };
+    crate::proc::adopt(child.id());
     let pgid = child.id() as i32;
     drain_stderr(kind, stderr);
 
