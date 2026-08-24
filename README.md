@@ -1,6 +1,10 @@
 # nurb-windows
 
-The Windows port of [nurb](https://github.com/Shpigford/nurb), maintained as a fork that tracks upstream. Everything below this note is nurb itself; this fork adds Windows support to the desktop app and its distribution, with the platform work kept behind `cfg(windows)` so upstream merges stay clean. One deliberate difference: agents on Windows run without an OS sandbox for now, so the app asks before every agent action instead of auto-approving the way the Seatbelt-sandboxed macOS app safely can.
+**Work in progress. Nothing here is released, and none of it should be installed from this repo yet.**
+
+This is the Windows port of [nurb](https://github.com/Shpigford/nurb), maintained as a fork that tracks upstream. If you want nurb today, go there: macOS and Linux users are served by the upstream project, and this fork exists only to bring the desktop app and its distribution to Windows. Everything below this note is upstream's own README and still describes nurb itself.
+
+Current state: the desktop app compiles, its test suites pass, and it produces a working (unsigned) NSIS installer, all verified on Windows CI. The Python engine's own suite still has a handful of Windows failures being worked through, there are no signed builds, no installer downloads, and no update feed yet. The platform work is kept behind `cfg(windows)` so upstream merges stay clean. One deliberate difference: agents on Windows run without an OS sandbox for now, so the app asks before every agent action instead of auto-approving the way the Seatbelt-sandboxed macOS app safely can.
 
 # nurb
 
