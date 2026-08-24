@@ -2,6 +2,7 @@ mod acp;
 mod agents;
 mod env;
 mod prefs;
+mod proc;
 mod provision;
 mod registry;
 mod sessions;
@@ -84,7 +85,7 @@ async fn create_project(
     folder: Option<String>,
 ) -> Result<String, String> {
     let name = name.trim().to_string();
-    if name.is_empty() || name.contains('/') || name.starts_with('.') {
+    if name.is_empty() || name.contains(['/', '\\']) || name.starts_with('.') {
         return Err("project names cannot be empty or contain slashes".into());
     }
     let base = project_base(folder, default_projects_folder_path(&app)?);
@@ -420,7 +421,10 @@ fn test_hook(app: AppHandle) {
 /// put a link. The two Help items are the only place in the app that reaches the
 /// outside world, alongside the same pair in the about box. "Check for Updates…"
 /// sits under About where every Mac app keeps it; the webview owns the update
-/// state, so the click is forwarded there as an event.
+/// state, so the click is forwarded there as an event. Windows has no separate
+/// menu bar to put any of this in (an in-window menu strip would cost a row of
+/// pixels for three items the about box already offers), so it installs none.
+#[cfg(target_os = "macos")]
 fn install_menu(app: &AppHandle) -> tauri::Result<()> {
     use tauri::menu::{Menu, MenuItem, HELP_SUBMENU_ID};
     let menu = Menu::default(app)?;
@@ -481,6 +485,7 @@ pub fn run() {
             app.manage(Registry::load(&dir));
             app.manage(sessions::SessionStore::load(&dir));
             app.manage(prefs::PrefStore::load(&dir));
+            #[cfg(target_os = "macos")]
             install_menu(app.handle())?;
             #[cfg(debug_assertions)]
             test_hook(app.handle().clone());

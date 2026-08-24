@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Stdio};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
@@ -240,10 +239,10 @@ fn spawn_server(
         .current_dir(project)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        // Its own process group, so killing it takes the whole uv -> python
-        // tree with it rather than orphaning the server.
-        .process_group(0);
+        .stderr(Stdio::inherit());
+    // Killable as one tree, so stopping it takes the whole uv -> python
+    // family with it rather than orphaning the server.
+    crate::proc::setup(&mut command);
     let process = command
         .spawn()
         .map_err(|e| format!("could not start nurb dev: {e}"))?;
@@ -311,9 +310,7 @@ fn kill_tree(server: &ProjectServer) {
         return;
     }
     let pgid = child.process.id() as i32;
-    unsafe {
-        libc::killpg(pgid, libc::SIGTERM);
-    }
+    crate::proc::kill_tree(pgid);
     for _ in 0..20 {
         if matches!(child.process.try_wait(), Ok(Some(_))) {
             child.stopped = true;
@@ -321,9 +318,7 @@ fn kill_tree(server: &ProjectServer) {
         }
         thread::sleep(Duration::from_millis(100));
     }
-    unsafe {
-        libc::killpg(pgid, libc::SIGKILL);
-    }
+    crate::proc::kill_tree_force(pgid);
     let _ = child.process.wait();
     child.stopped = true;
 }
@@ -344,14 +339,21 @@ mod tests {
 
     #[test]
     fn shutdown_kills_a_server_that_is_still_starting() {
-        let process = Command::new("sh")
-            .args(["-c", "sleep 60"])
+        let mut command = if cfg!(windows) {
+            let mut c = Command::new("cmd");
+            c.args(["/C", "ping -n 60 127.0.0.1 >NUL"]);
+            c
+        } else {
+            let mut c = Command::new("sh");
+            c.args(["-c", "sleep 60"]);
+            c
+        };
+        command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .process_group(0)
-            .spawn()
-            .unwrap();
+            .stderr(Stdio::null());
+        crate::proc::setup(&mut command);
+        let process = command.spawn().unwrap();
         let server = Arc::new(ProjectServer {
             child: Mutex::new(ManagedChild {
                 process,

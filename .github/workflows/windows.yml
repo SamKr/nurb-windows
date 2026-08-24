@@ -1,0 +1,63 @@
+name: windows
+
+on:
+  push:
+    branches: [main, windows-port]
+  pull_request:
+
+jobs:
+  # The engine suite on Windows. Playwright's --with-deps flag is a Linux
+  # package-manager step and errors on Windows, so the browser installs bare.
+  engine:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - run: uv sync --locked --all-extras --dev
+
+      - run: uv run playwright install chromium
+
+      - run: uv run pytest -q -n auto
+
+  # The desktop app: Rust core, TypeScript shell, and the staged bundle
+  # inputs, on the OS the fork exists for. `cargo check --all-targets`
+  # compiles the tests too, so every cfg(windows) branch is exercised by the
+  # type system even where a test cannot run headless.
+  desktop:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+
+      - run: npm ci
+        working-directory: desktop
+
+      - run: npm run stage
+        working-directory: desktop
+
+      - run: ./node_modules/.bin/tsc --noEmit
+        working-directory: desktop
+
+      - run: npm test
+        working-directory: desktop
+
+      - run: cargo check --all-targets
+        working-directory: desktop/src-tauri
+
+      - run: cargo test
+        working-directory: desktop/src-tauri

@@ -38,3 +38,8 @@ sha2 = "0.10"
 trash = "5"
 tauri-plugin-clipboard-manager = "2"
 
+# The Gemini API key's store on Windows: the Credential Manager, where macOS
+# uses the Keychain through the security CLI (agents.rs).
+[target.'cfg(windows)'.dependencies]
+keyring = { version = "3", default-features = false, features = ["windows-native"] }
+

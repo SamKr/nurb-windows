@@ -44,7 +44,7 @@ export default function Setup({ onDone }: { onDone: () => void }) {
     }
   };
 
-  // Opens a bug report with the error, app version, macOS version, and
+  // Opens a bug report with the error, app version, OS version, and
   // architecture already filled in, so a failed setup never sends anyone
   // hunting through logs.
   const report = async () => {
@@ -54,6 +54,7 @@ export default function Setup({ onDone }: { onDone: () => void }) {
         appVersion: string;
         nurbVersion: string;
         occtVersion: string | null;
+        os: string;
         osVersion: string;
         arch: string;
       }>("about_info");
@@ -61,7 +62,7 @@ export default function Setup({ onDone }: { onDone: () => void }) {
         `app ${about.appVersion}`,
         `CAD engine ${about.nurbVersion}`,
         about.occtVersion ? `OCCT ${about.occtVersion}` : null,
-        `macOS ${about.osVersion} (${about.arch})`,
+        `${about.os} ${about.osVersion} (${about.arch})`,
       ]
         .filter(Boolean)
         .join("\n");

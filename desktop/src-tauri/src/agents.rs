@@ -11,9 +11,12 @@
 //! shares credentials with any terminal install either way, because every
 //! agent reads its own store (~/.claude, ~/.codex, Cursor's, ~/.grok).
 
+#[cfg(not(windows))]
 use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Command;
+#[cfg(not(windows))]
+use std::process::Stdio;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -103,6 +106,8 @@ impl AgentKind {
     /// Where a native CLI actually is: the vendor installer's fixed spot
     /// first, then PATH for nonstandard installs. None when it is not on this
     /// machine, which is what "installed: false" means for these agents.
+    /// Windows executables carry an extension, so each candidate directory is
+    /// probed for name.exe and name.cmd (the shape npm-installed CLIs take).
     pub fn native_bin(self) -> Option<PathBuf> {
         let (name, _) = self.native_command()?;
         let install_dir = match self {
@@ -110,13 +115,20 @@ impl AgentKind {
             Self::Grok => ".grok/bin",
             Self::Claude | Self::Codex | Self::Gemini => return None,
         };
-        let home = PathBuf::from(std::env::var("HOME").ok()?);
-        let default = home.join(install_dir).join(name);
-        if default.is_file() {
-            return Some(default);
+        let filenames: Vec<String> = if cfg!(windows) {
+            vec![format!("{name}.exe"), format!("{name}.cmd")]
+        } else {
+            vec![name.to_string()]
+        };
+        let home = home()?;
+        for filename in &filenames {
+            let default = home.join(install_dir).join(filename);
+            if default.is_file() {
+                return Some(default);
+            }
         }
         std::env::split_paths(&std::env::var_os("PATH")?)
-            .map(|dir| dir.join(name))
+            .flat_map(|dir| filenames.iter().map(move |filename| dir.join(filename)))
             .find(|candidate| candidate.is_file())
     }
 
@@ -133,8 +145,13 @@ impl AgentKind {
 
     /// The vendor's one-line installer, for the "need another agent?" help.
     /// Only the native CLIs have one; the adapter-hosted pair arrive with the
-    /// app and are never absent outside a broken dev machine.
+    /// app and are never absent outside a broken dev machine. The vendors
+    /// publish no Windows one-liner, so Windows offers none rather than a
+    /// bash line that fails in PowerShell.
     pub fn install_command(self) -> Option<&'static str> {
+        if cfg!(windows) {
+            return None;
+        }
         match self {
             Self::Cursor => Some("curl https://cursor.com/install -fsSL | bash"),
             Self::Grok => Some("curl -fsSL https://x.ai/cli/install.sh | bash"),
@@ -239,18 +256,50 @@ fn claude_auth_status(launcher: &crate::env::Launcher) -> (Option<bool>, Option<
 /// handling catches that honestly on first use.) Codex alone honors a HOME
 /// override env var.
 fn auth_file(dir: &str) -> PathBuf {
-    let home = if dir == ".codex" {
+    let base = if dir == ".codex" {
         std::env::var("CODEX_HOME").map(PathBuf::from).ok()
     } else {
         None
     };
-    home.unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(dir))
+    base.unwrap_or_else(|| home().unwrap_or_default().join(dir))
         .join("auth.json")
+}
+
+/// The user's home directory: HOME on POSIX, USERPROFILE on Windows (agents
+/// like Codex and Grok keep their dotdirs under it on both).
+fn home() -> Option<PathBuf> {
+    let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    std::env::var_os(var).map(PathBuf::from)
 }
 
 const GEMINI_KEYCHAIN_SERVICE: &str = "dev.nurb.desktop.gemini-api-key";
 const GEMINI_KEYCHAIN_ACCOUNT: &str = "gemini";
 
+/// Windows has no `security` CLI; the key lives in the Windows Credential
+/// Manager instead, through the keyring crate's native store.
+#[cfg(windows)]
+pub(crate) fn gemini_api_key() -> Result<String, String> {
+    let entry = keyring::Entry::new(GEMINI_KEYCHAIN_SERVICE, GEMINI_KEYCHAIN_ACCOUNT)
+        .map_err(|error| format!("could not read the Gemini API key: {error}"))?;
+    match entry.get_password() {
+        Ok(key) if !key.trim().is_empty() => Ok(key.trim().to_string()),
+        Ok(_) => Err("Gemini API key is empty".into()),
+        Err(keyring::Error::NoEntry) => Err("Gemini API key not found".into()),
+        Err(error) => Err(format!("could not read the Gemini API key: {error}")),
+    }
+}
+
+#[cfg(windows)]
+fn save_gemini_api_key(key: &str) -> Result<(), String> {
+    if key.contains(['\r', '\n']) {
+        return Err("Gemini API key contains an invalid line break".into());
+    }
+    keyring::Entry::new(GEMINI_KEYCHAIN_SERVICE, GEMINI_KEYCHAIN_ACCOUNT)
+        .and_then(|entry| entry.set_password(key))
+        .map_err(|error| format!("could not save the Gemini API key: {error}"))
+}
+
+#[cfg(not(windows))]
 pub(crate) fn gemini_api_key() -> Result<String, String> {
     let output = Command::new("/usr/bin/security")
         .args([
@@ -277,6 +326,7 @@ pub(crate) fn gemini_api_key() -> Result<String, String> {
     }
 }
 
+#[cfg(not(windows))]
 fn save_gemini_api_key(key: &str) -> Result<(), String> {
     let key = security_interactive_argument(key)?;
     let command = format!(
@@ -302,6 +352,7 @@ fn save_gemini_api_key(key: &str) -> Result<(), String> {
         .ok_or_else(|| "macOS Keychain did not save the Gemini API key".into())
 }
 
+#[cfg(not(windows))]
 fn security_interactive_argument(value: &str) -> Result<String, String> {
     if value.contains(['\r', '\n']) {
         return Err("Gemini API key contains an invalid line break".into());
@@ -343,9 +394,7 @@ impl Logins {
 
     pub fn shutdown(&self) {
         for pgid in self.0.lock().unwrap().drain(..) {
-            unsafe {
-                libc::killpg(pgid, libc::SIGTERM);
-            }
+            crate::proc::kill_tree(pgid);
         }
     }
 }
@@ -395,7 +444,6 @@ pub async fn agent_login(
     }
     let (pgid_tx, pgid_rx) = std::sync::mpsc::channel::<i32>();
     let done = tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
-        use std::os::unix::process::CommandExt;
         let mut command = Command::new(program);
         if let Some(path) = adapter_path {
             command.env("PATH", path);
@@ -403,12 +451,13 @@ pub async fn agent_login(
         if let Some(cli) = codex_cli {
             command.env("CODEX_PATH", cli);
         }
-        let mut child = command
+        command
             .args(&args)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .process_group(0)
+            .stderr(std::process::Stdio::piped());
+        crate::proc::setup(&mut command);
+        let mut child = command
             .spawn()
             .map_err(|e| format!("could not start the sign-in: {e}"))?;
         let pgid = child.id() as i32;
@@ -432,9 +481,7 @@ pub async fn agent_login(
         Ok(joined) => joined.map_err(|e| e.to_string())?,
         Err(_) => {
             if let Ok(pgid) = pgid_rx.try_recv() {
-                unsafe {
-                    libc::killpg(pgid, libc::SIGTERM);
-                }
+                crate::proc::kill_tree(pgid);
             }
             Err("The sign-in timed out. Try again.".into())
         }
@@ -445,6 +492,7 @@ pub async fn agent_login(
 mod tests {
     use super::AgentKind;
 
+    #[cfg(not(windows))]
     #[test]
     fn keychain_input_quotes_the_key_as_one_interactive_argument() {
         assert_eq!(

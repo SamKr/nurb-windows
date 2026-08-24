@@ -10,6 +10,11 @@
 //! The answer is always the adapter's own allow-once option, so nothing is
 //! remembered on the agent side. A request offering no allow-once option
 //! still falls to a dialog, which keeps the UI honest about anything novel.
+//!
+//! All of that holds only where the kernel actually is the guard. On Windows
+//! there is no OS sandbox yet (sandbox.rs), so nothing is auto-allowed and
+//! every request reaches the user as a dialog; auto-approving an unconfined
+//! agent would hand it the whole disk.
 
 use std::path::Path;
 
@@ -18,6 +23,9 @@ use agent_client_protocol::schema::v1::{
 };
 
 pub(super) fn auto_allow(request: &RequestPermissionRequest) -> Option<PermissionOptionId> {
+    if !super::sandbox::KERNEL_ENFORCED {
+        return None;
+    }
     request
         .options
         .iter()
@@ -68,6 +76,20 @@ mod tests {
         .unwrap()
     }
 
+    /// Without a kernel sandbox, nothing may be auto-allowed: the same
+    /// requests the macOS build waves through must all reach a dialog.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn without_a_kernel_sandbox_every_request_reaches_a_dialog() {
+        let req = request(serde_json::json!({
+            "toolCallId": "t1",
+            "kind": "execute",
+            "rawInput": { "command": "del /s /q C:\\Users\\me\\anything" }
+        }));
+        assert_eq!(auto_allow(&req), None);
+    }
+
+    #[cfg(target_os = "macos")]
     #[test]
     fn every_request_is_allowed_because_the_sandbox_is_the_guard() {
         // Shapes the old parser dialogued on, plus ones it never allowed:
@@ -99,6 +121,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn an_offer_without_allow_once_still_reaches_a_dialog() {
         let req: RequestPermissionRequest = serde_json::from_value(serde_json::json!({

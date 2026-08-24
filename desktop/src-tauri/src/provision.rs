@@ -8,7 +8,6 @@
 
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -31,7 +30,8 @@ const NATIVE_CLI_HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
 const NPM_CI_ARGS: &[&str] = &["ci", "--include=optional", "--no-fund", "--no-audit"];
 static PROBE_ID: AtomicU64 = AtomicU64::new(0);
 
-/// Published SHASUMS256 entries for the pinned Node tarballs.
+/// Published SHASUMS256 entries for the pinned Node archives.
+#[cfg(target_os = "macos")]
 const NODE_SHA256: &[(&str, &str)] = &[
     (
         "aarch64",
@@ -40,6 +40,17 @@ const NODE_SHA256: &[(&str, &str)] = &[
     (
         "x86_64",
         "d35e95230f46f6f0751df497c56622c6735e05d5e1fb1630996a005b9d328fe4",
+    ),
+];
+#[cfg(windows)]
+const NODE_SHA256: &[(&str, &str)] = &[
+    (
+        "aarch64",
+        "8502f4a50b458d4cc38ed8f2001556c2cd239d464920f74017926ccb1e1c157f",
+    ),
+    (
+        "x86_64",
+        "57f71ab3652e797d84acddc79c81cc9ff1c6ddb2a1974cdb83f00fee9bff4c73",
     ),
 ];
 
@@ -84,9 +95,7 @@ impl Provisioner {
     pub fn shutdown(&self) {
         self.shutting_down.store(true, Ordering::SeqCst);
         if let Some(pgid) = *self.pgid.lock().unwrap() {
-            unsafe {
-                libc::killpg(pgid, libc::SIGTERM);
-            }
+            crate::proc::kill_tree(pgid);
         }
     }
 }
@@ -272,8 +281,8 @@ fn probe_output(
     command
         .stdin(Stdio::null())
         .stdout(Stdio::from(output))
-        .stderr(Stdio::from(errors))
-        .process_group(0);
+        .stderr(Stdio::from(errors));
+    crate::proc::setup(&mut command);
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(e) => {
@@ -293,9 +302,7 @@ fn probe_output(
                 std::thread::sleep(Duration::from_millis(25));
             }
             Ok(None) | Err(_) => {
-                unsafe {
-                    libc::killpg(pgid, libc::SIGKILL);
-                }
+                crate::proc::kill_tree_force(pgid);
                 let _ = child.wait();
                 break Err(None);
             }
@@ -336,6 +343,20 @@ fn probe_output(
     }
 }
 
+/// The OS's own copy of a stock tool, by absolute path so a doctored PATH
+/// cannot supply an impostor. macOS keeps them in /usr/bin; Windows has
+/// shipped both curl and (bsd)tar in System32 since Windows 10 1803.
+fn system_tool(name: &str) -> PathBuf {
+    if cfg!(windows) {
+        let root = std::env::var_os("SystemRoot")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+        root.join("System32").join(format!("{name}.exe"))
+    } else {
+        PathBuf::from("/usr/bin").join(name)
+    }
+}
+
 fn adapter_pins() -> Vec<String> {
     agents::ALL
         .iter()
@@ -370,6 +391,9 @@ pub struct AboutInfo {
     pub app_version: String,
     pub nurb_version: String,
     pub occt_version: Option<String>,
+    /// The OS family name the about box and bug reports print ("macOS",
+    /// "Windows"), so the frontend never hardcodes a platform.
+    pub os: &'static str,
     pub os_version: String,
     pub arch: String,
 }
@@ -391,21 +415,45 @@ pub fn about_info(app: tauri::AppHandle) -> Result<AboutInfo, String> {
     let occt_version = std::fs::read_to_string(dir.join("requirements.lock"))
         .ok()
         .and_then(|lock| occt_version(&lock));
-    let os_version = std::process::Command::new("sw_vers")
-        .arg("-productVersion")
-        .output()
-        .ok()
-        .filter(|out| out.status.success())
-        .and_then(|out| String::from_utf8(out.stdout).ok())
-        .map(|v| v.trim().to_string())
-        .unwrap_or_else(|| "unknown".into());
     Ok(AboutInfo {
         app_version,
         nurb_version,
         occt_version,
-        os_version,
+        os: if cfg!(windows) { "Windows" } else { "macOS" },
+        os_version: os_version(),
         arch: std::env::consts::ARCH.into(),
     })
+}
+
+/// The version string beside the OS name in the about box and bug reports.
+fn os_version() -> String {
+    let mut command = if cfg!(windows) {
+        // `cmd /C ver` prints "Microsoft Windows [Version 10.0.26200.1234]";
+        // the number inside the brackets is the version.
+        let mut c = std::process::Command::new(system_tool("cmd"));
+        c.args(["/C", "ver"]);
+        c
+    } else {
+        let mut c = std::process::Command::new("sw_vers");
+        c.arg("-productVersion");
+        c
+    };
+    crate::proc::setup(&mut command);
+    command
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .and_then(|out| String::from_utf8(out.stdout).ok())
+        .map(|v| match v.split_once('[') {
+            Some((_, tail)) => tail
+                .trim_start_matches(|c: char| !c.is_ascii_digit())
+                .trim_end()
+                .trim_end_matches(']')
+                .to_string(),
+            None => v.trim().to_string(),
+        })
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "unknown".into())
 }
 
 #[tauri::command]
@@ -539,20 +587,24 @@ fn provision_chat(
         .find(|(arch, _)| *arch == std::env::consts::ARCH)
         .ok_or_else(|| format!("unsupported architecture: {}", std::env::consts::ARCH))?;
     let arch = if *arch == "aarch64" { "arm64" } else { "x64" };
-    let tarball_name = format!("node-{NODE_VERSION}-darwin-{arch}.tar.xz");
-    let tarball = paths.data().join(&tarball_name);
-    let mut download = Command::new("/usr/bin/curl");
+    let archive_name = if cfg!(windows) {
+        format!("node-{NODE_VERSION}-win-{arch}.zip")
+    } else {
+        format!("node-{NODE_VERSION}-darwin-{arch}.tar.xz")
+    };
+    let archive = paths.data().join(&archive_name);
+    let mut download = Command::new(system_tool("curl"));
     download
         .args(["-fSL", "--retry", "3", "-o"])
-        .arg(&tarball)
+        .arg(&archive)
         .arg(format!(
-            "https://nodejs.org/dist/{NODE_VERSION}/{tarball_name}"
+            "https://nodejs.org/dist/{NODE_VERSION}/{archive_name}"
         ));
     run_step(provisioner, channel, download, "the chat runtime download")?;
     let bytes =
-        std::fs::read(&tarball).map_err(|e| format!("could not read {tarball_name}: {e}"))?;
+        std::fs::read(&archive).map_err(|e| format!("could not read {archive_name}: {e}"))?;
     if format!("{:x}", Sha256::digest(&bytes)) != *sha {
-        let _ = std::fs::remove_file(&tarball);
+        let _ = std::fs::remove_file(&archive);
         return Err("the chat runtime download did not match its checksum".into());
     }
     if paths.node_dir().exists() {
@@ -560,15 +612,17 @@ fn provision_chat(
             .map_err(|e| format!("could not clear the old runtime: {e}"))?;
     }
     std::fs::create_dir_all(paths.node_dir()).map_err(|e| e.to_string())?;
-    let mut extract = Command::new("/usr/bin/tar");
+    // Both OSes ship bsdtar as their system tar, and -xf auto-detects the
+    // format, so one invocation unpacks the .tar.xz and the .zip alike.
+    let mut extract = Command::new(system_tool("tar"));
     extract
-        .arg("-xJf")
-        .arg(&tarball)
+        .arg("-xf")
+        .arg(&archive)
         .arg("-C")
         .arg(paths.node_dir())
         .args(["--strip-components", "1"]);
     run_step(provisioner, channel, extract, "the chat runtime unpack")?;
-    let _ = std::fs::remove_file(&tarball);
+    let _ = std::fs::remove_file(&archive);
 
     if paths.adapters().exists() {
         std::fs::remove_dir_all(paths.adapters())
@@ -619,8 +673,8 @@ fn run_step(
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0);
+        .stderr(Stdio::piped());
+    crate::proc::setup(&mut command);
     let mut child = command
         .spawn()
         .map_err(|e| format!("could not start {what}: {e}"))?;
@@ -629,9 +683,7 @@ fn run_step(
     // A shutdown can land between the check above and the spawn; now that the
     // pgid is published, re-check so that window cannot leak the child.
     if provisioner.shutting_down.load(Ordering::SeqCst) {
-        unsafe {
-            libc::killpg(pgid, libc::SIGTERM);
-        }
+        crate::proc::kill_tree(pgid);
     }
     let tail = Arc::new(Mutex::new(VecDeque::<String>::new()));
     let readers = [
@@ -692,14 +744,17 @@ fn stream_lines(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+    #[cfg(unix)]
     use std::process::Command;
+    #[cfg(unix)]
     use std::time::Duration;
 
-    use super::{
-        chat_runtime_check, chat_runtime_ok, file_hash, occt_version, probe_version, wheel_version,
-        NPM_CI_ARGS, PROBE_ID,
-    };
+    #[cfg(unix)]
+    use super::{chat_runtime_check, chat_runtime_ok, probe_version, PROBE_ID};
+    use super::{file_hash, occt_version, wheel_version, NPM_CI_ARGS};
+    #[cfg(unix)]
     use crate::env::{Paths, NODE_VERSION};
 
     #[test]
@@ -733,6 +788,44 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// The same probe properties as the unix test below, phrased in cmd.
+    #[cfg(windows)]
+    #[test]
+    fn health_probe_requires_the_expected_version_and_cannot_hang_on_windows() {
+        use super::{probe_version, system_tool};
+        use std::process::Command;
+        use std::time::Duration;
+        let dir = std::env::temp_dir();
+        let cmd = || {
+            let mut c = Command::new(system_tool("cmd"));
+            c.arg("/C");
+            c
+        };
+
+        let mut good = cmd();
+        good.arg("echo adapter 1.2.3");
+        assert!(probe_version(good, &dir, "1.2.3", Duration::from_secs(5)).is_ok());
+
+        let mut wrong = cmd();
+        wrong.arg("echo 9.9.9");
+        let mismatch = probe_version(wrong, &dir, "1.2.3", Duration::from_secs(5));
+        assert_eq!(mismatch.unwrap_err(), "it reported 9.9.9 instead of 1.2.3");
+
+        let mut failing = cmd();
+        failing.arg("echo no such device& exit 3");
+        let failed = probe_version(failing, &dir, "1.2.3", Duration::from_secs(5));
+        assert!(
+            failed.as_ref().unwrap_err().contains("it exited with status 3"),
+            "{failed:?}"
+        );
+
+        let mut hung = cmd();
+        hung.arg("ping -n 60 127.0.0.1 >NUL");
+        let timed_out = probe_version(hung, &dir, "1.2.3", Duration::from_millis(200));
+        assert_eq!(timed_out.unwrap_err(), "it did not finish within 0s");
+    }
+
+    #[cfg(unix)]
     #[test]
     fn health_probe_requires_the_expected_version_and_cannot_hang() {
         let dir = std::env::temp_dir();
@@ -777,6 +870,9 @@ mod tests {
             .any(|args| args == ["ci", "--include=optional"]));
     }
 
+    /// The fake node here is a shell script, which only an exec-family OS can
+    /// treat as the node binary; the probe logic it exercises is shared.
+    #[cfg(unix)]
     #[test]
     fn chat_health_exercises_the_native_agent_clis() {
         let dir = std::env::temp_dir().join(format!(

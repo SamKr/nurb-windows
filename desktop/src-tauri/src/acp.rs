@@ -114,9 +114,7 @@ impl Chats {
     pub fn shutdown(&self) {
         let sessions = std::mem::take(&mut *self.sessions.lock().unwrap());
         for session in sessions.values() {
-            unsafe {
-                libc::killpg(session.pgid, libc::SIGTERM);
-            }
+            crate::proc::kill_tree(session.pgid);
         }
     }
 }
@@ -438,10 +436,14 @@ fn attachment_block(path: &std::path::Path) -> Result<ContentBlock, String> {
         _ => None,
     };
     let Some(mime) = mime else {
-        return Ok(ContentBlock::ResourceLink(ResourceLink::new(
-            name,
-            format!("file://{}", path.display()),
-        )));
+        // A file URI always uses forward slashes; on Windows the drive-letter
+        // path additionally sits behind its own slash (file:///C:/...).
+        let uri = if cfg!(windows) {
+            format!("file:///{}", path.display().to_string().replace('\\', "/"))
+        } else {
+            format!("file://{}", path.display())
+        };
+        return Ok(ContentBlock::ResourceLink(ResourceLink::new(name, uri)));
     };
     let data = std::fs::read(path).map_err(|e| format!("cannot read {name}: {e}"))?;
     if data.len() > 10 * 1024 * 1024 {
@@ -970,19 +972,15 @@ pub(crate) fn session_to_remove(
     }
 }
 
-/// SIGTERM the adapter's process group and reap the child, escalating to
-/// SIGKILL if it lingers.
+/// Stop the adapter's process tree and reap the child, escalating to a hard
+/// kill if it lingers.
 async fn reap(pgid: i32, mut child: async_process::Child) {
-    unsafe {
-        libc::killpg(pgid, libc::SIGTERM);
-    }
+    crate::proc::kill_tree(pgid);
     if tokio::time::timeout(Duration::from_secs(5), child.status())
         .await
         .is_err()
     {
-        unsafe {
-            libc::killpg(pgid, libc::SIGKILL);
-        }
+        crate::proc::kill_tree_force(pgid);
         let _ = child.status().await;
     }
 }
@@ -1013,7 +1011,7 @@ fn drain_stderr(kind: AgentKind, stderr: async_process::ChildStderr) {
 fn friendly(kind: AgentKind, error: agent_client_protocol::Error) -> String {
     if error.code == ErrorCode::AuthRequired || error.message.contains("Failed to authenticate") {
         format!(
-            "auth_required: {} is not signed in on this Mac",
+            "auth_required: {} is not signed in on this computer",
             kind.label()
         )
     } else {

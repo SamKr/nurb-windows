@@ -1,3 +1,7 @@
+# nurb-windows
+
+The Windows port of [nurb](https://github.com/Shpigford/nurb), maintained as a fork that tracks upstream. Everything below this note is nurb itself; this fork adds Windows support to the desktop app and its distribution, with the platform work kept behind `cfg(windows)` so upstream merges stay clean. One deliberate difference: agents on Windows run without an OS sandbox for now, so the app asks before every agent action instead of auto-approving the way the Seatbelt-sandboxed macOS app safely can.
+
 # nurb
 
 Tell your AI what you need printed. Watch the part take shape live. Print it.

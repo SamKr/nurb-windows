@@ -18,6 +18,7 @@ import {
   type ChatColumn,
 } from "./chatColumns";
 import { IconCheck, IconCube, IconCubes, IconFolder, IconFolderPlus, IconGear, IconVariant } from "./Icons";
+import { onWindows } from "./platform";
 import { COLUMNS, fitColumns, initialColumns, resizedColumn } from "./layout";
 import Logo from "./Logo";
 import type { Column } from "./layout";
@@ -73,6 +74,7 @@ type AboutInfo = {
   appVersion: string;
   nurbVersion: string;
   occtVersion: string | null;
+  os: string;
   osVersion: string;
   arch: string;
 };
@@ -106,7 +108,9 @@ function DeleteHints({ places }: { places: string[] }) {
           building
         </span>
       )}
-      <span className="context-hint">moves its files to the Trash</span>
+      <span className="context-hint">
+        moves its files to the {onWindows ? "Recycle Bin" : "Trash"}
+      </span>
     </>
   );
 }
@@ -1296,6 +1300,7 @@ function App() {
           appVersion={about.appVersion}
           nurbVersion={about.nurbVersion}
           occtVersion={about.occtVersion}
+          os={about.os}
           osVersion={about.osVersion}
           arch={about.arch}
           onClose={() => setShowAbout(false)}

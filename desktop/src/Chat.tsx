@@ -108,7 +108,7 @@ const KIND_VERBS: Record<string, [string, string]> = {
   think: ["thinking", "think"],
 };
 
-const basename = (path: string) => path.split("/").pop() ?? path;
+const basename = (path: string) => path.split(/[\\/]/).pop() ?? path;
 
 // The button's own label: the selected names, not the model ids, since those
 // are the agent's wire values and mean nothing to someone printing a bracket.

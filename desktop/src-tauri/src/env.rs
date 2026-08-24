@@ -48,7 +48,7 @@ impl Launcher {
                 command.args(["run", "--project"]).arg(repo).arg("nurb");
                 command
             }
-            Self::Provisioned { paths } => Command::new(paths.venv().join("bin/nurb")),
+            Self::Provisioned { paths } => Command::new(paths.venv_bin("nurb")),
         }
     }
 
@@ -77,7 +77,10 @@ impl Launcher {
             Self::Checkout { .. } => {
                 let mut args = vec!["-y".into(), pin.into()];
                 args.extend(acp_args);
-                ("npx".into(), args)
+                // npx is a .cmd batch shim on Windows, and CreateProcess only
+                // resolves .exe from a bare name.
+                let npx = if cfg!(windows) { "npx.cmd" } else { "npx" };
+                (npx.into(), args)
             }
             Self::Provisioned { paths } => (
                 paths.node_bin().to_string_lossy().into_owned(),
@@ -96,12 +99,26 @@ impl Launcher {
         match self {
             Self::Checkout { .. } => None,
             Self::Provisioned { paths } => {
-                let inherited = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into());
-                Some(format!(
-                    "{}:{}:{inherited}",
-                    paths.venv().join("bin").display(),
-                    paths.node_dir().join("bin").display(),
-                ))
+                // Windows keeps console binaries in the venv's Scripts and at
+                // the Node install's root; POSIX keeps both under bin/.
+                let (venv_bin, node_bin) = if cfg!(windows) {
+                    (paths.venv().join("Scripts"), paths.node_dir())
+                } else {
+                    (paths.venv().join("bin"), paths.node_dir().join("bin"))
+                };
+                let inherited = std::env::var_os("PATH").unwrap_or_else(|| {
+                    if cfg!(windows) {
+                        Default::default()
+                    } else {
+                        "/usr/bin:/bin".into()
+                    }
+                });
+                let entries = [venv_bin, node_bin]
+                    .into_iter()
+                    .chain(std::env::split_paths(&inherited));
+                std::env::join_paths(entries)
+                    .ok()
+                    .map(|joined| joined.to_string_lossy().into_owned())
             }
         }
     }
@@ -165,45 +182,108 @@ impl Paths {
         self.data.join("env")
     }
 
+    /// A console entry point inside the venv. Windows venvs put renamed-exe
+    /// launchers in Scripts\; POSIX venvs put scripts in bin/.
+    pub fn venv_bin(&self, name: &str) -> PathBuf {
+        if cfg!(windows) {
+            self.venv().join("Scripts").join(format!("{name}.exe"))
+        } else {
+            self.venv().join("bin").join(name)
+        }
+    }
+
     pub fn venv_python(&self) -> PathBuf {
-        self.venv().join("bin/python")
+        self.venv_bin("python")
     }
 
     pub fn node_dir(&self) -> PathBuf {
         self.data.join("node")
     }
 
+    /// The Windows zip keeps node.exe at the archive root; the POSIX tarballs
+    /// keep node under bin/.
     pub fn node_bin(&self) -> PathBuf {
-        self.node_dir().join("bin/node")
+        if cfg!(windows) {
+            self.node_dir().join("node.exe")
+        } else {
+            self.node_dir().join("bin/node")
+        }
     }
 
-    /// npm as shipped inside the Node tarball, invoked through its JS entry
+    /// npm as shipped inside the Node archive, invoked through its JS entry
     /// so nothing depends on PATH.
     pub fn npm_cli(&self) -> PathBuf {
-        self.node_dir().join("lib/node_modules/npm/bin/npm-cli.js")
+        if cfg!(windows) {
+            self.node_dir().join("node_modules/npm/bin/npm-cli.js")
+        } else {
+            self.node_dir().join("lib/node_modules/npm/bin/npm-cli.js")
+        }
     }
 
     pub fn adapters(&self) -> PathBuf {
         self.data.join("adapters")
     }
 
+    /// The script `node` runs to start an adapter. On POSIX, npm's .bin entry
+    /// is a symlink to the package's JS entry, so it works as both. On
+    /// Windows, .bin holds shell/cmd shims instead, so the entry is resolved
+    /// from the installed package's own manifest; the bin table's relative
+    /// path is exactly what npm built those shims from.
     pub fn adapter_script(&self, kind: AgentKind) -> PathBuf {
-        self.adapters()
-            .join("node_modules/.bin")
-            .join(kind.adapter_bin().expect("adapter-hosted"))
+        let bin = kind.adapter_bin().expect("adapter-hosted");
+        if !cfg!(windows) {
+            return self.adapters().join("node_modules/.bin").join(bin);
+        }
+        let pin = kind.adapter().expect("adapter-hosted");
+        let (package, _) = pin.rsplit_once('@').expect("adapter pins are name@version");
+        let root = self.adapters().join("node_modules").join(package);
+        js_entry(&root, bin).unwrap_or_else(|| root.join("dist/index.js"))
     }
 
     /// The Codex CLI npm installs as a dependency of the Codex adapter.
     /// codex-acp's ACP server falls back to this copy on its own, but its
     /// login path spawns a bare `codex` off PATH instead, so the app has to
-    /// name it. See `CODEX_PATH` in agents.rs.
+    /// name it. See `CODEX_PATH` in agents.rs. On Windows the .bin shim and
+    /// the JS launcher are both unspawnable as a plain executable, so this
+    /// points at the real codex.exe inside the platform package npm installed
+    /// as @openai/codex's optional dependency.
     pub fn codex_cli(&self) -> PathBuf {
-        self.adapters().join("node_modules/.bin/codex")
+        if !cfg!(windows) {
+            return self.adapters().join("node_modules/.bin/codex");
+        }
+        let triple = match std::env::consts::ARCH {
+            "aarch64" => "aarch64-pc-windows-msvc",
+            _ => "x86_64-pc-windows-msvc",
+        };
+        let package = match std::env::consts::ARCH {
+            "aarch64" => "codex-win32-arm64",
+            _ => "codex-win32-x64",
+        };
+        self.adapters()
+            .join("node_modules/@openai")
+            .join(package)
+            .join("vendor")
+            .join(triple)
+            .join("bin/codex.exe")
     }
 
     pub fn stamp(&self) -> PathBuf {
         self.data.join("provisioned.json")
     }
+}
+
+/// The JS file an installed npm package's bin table names, which is the file
+/// its .bin shims run. `bin` is either a map (name -> path) or, for a package
+/// with a single entry named after itself, a bare string. Only consulted on
+/// Windows; POSIX spawns the .bin symlink directly.
+fn js_entry(package_root: &std::path::Path, bin: &str) -> Option<PathBuf> {
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(package_root.join("package.json")).ok()?).ok()?;
+    let relative = match &manifest["bin"] {
+        serde_json::Value::String(path) => path.as_str(),
+        table => table.get(bin)?.as_str()?,
+    };
+    Some(package_root.join(relative))
 }
 
 /// The bundled uv sidecar: Tauri strips the target-triple suffix and places
@@ -217,7 +297,7 @@ pub fn uv_sidecar() -> Result<PathBuf, String> {
     } else {
         dir
     };
-    let uv = dir.join("uv");
+    let uv = dir.join(if cfg!(windows) { "uv.exe" } else { "uv" });
     if uv.is_file() {
         Ok(uv)
     } else {
