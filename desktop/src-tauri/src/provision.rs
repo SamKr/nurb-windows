@@ -229,8 +229,17 @@ fn chat_runtime_check(paths: &Paths) -> Result<(), String> {
     probe_output(claude, paths.data(), NATIVE_CLI_HEALTH_TIMEOUT)
         .map_err(|why| format!("the Claude CLI check failed: {why}"))?;
 
-    let mut codex = Command::new(paths.node_bin());
-    codex.arg(paths.codex_cli()).arg("--version");
+    // The Codex CLI is a JS launcher with a shebang on POSIX, so it runs
+    // through node; on Windows it is the real codex.exe (see Paths::codex_cli),
+    // which node would try to load as a module, so it runs as itself.
+    let mut codex = if cfg!(windows) {
+        Command::new(paths.codex_cli())
+    } else {
+        let mut through_node = Command::new(paths.node_bin());
+        through_node.arg(paths.codex_cli());
+        through_node
+    };
+    codex.arg("--version");
     probe_output(codex, paths.data(), NATIVE_CLI_HEALTH_TIMEOUT)
         .map_err(|why| format!("the Codex CLI check failed: {why}"))?;
     Ok(())
