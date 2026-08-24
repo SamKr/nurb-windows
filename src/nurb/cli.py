@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import errno
 import importlib.metadata
+import os
 import pathlib
 import sys
 
@@ -1100,7 +1101,6 @@ DEFAULT_FORMATS = ("3mf",)
 
 
 def _is_free(port):
-    import os
     import socket
 
     with socket.socket() as probe:
@@ -1207,11 +1207,16 @@ def cmd_dev(args):
         sys.exit(f"  port {port} was taken between checking it and binding it. Try again.")
 
 
-LAUNCHER = "viewer.command"
+LAUNCHER = "viewer.bat" if os.name == "nt" else "viewer.command"
 
 
 def _write_launcher(root):
     file = root / LAUNCHER
+    if os.name == "nt":
+        # A .bat, because that is what Explorer runs on a double-click; /d so
+        # the cd survives the project living on another drive letter.
+        file.write_text('@echo off\ncd /d "%~dp0"\nnurb dev --open\n')
+        return file
     # A login shell, because Finder's Terminal session does not carry the PATH a
     # profile adds, and the double-click would die on `command not found: nurb`.
     file.write_text(
@@ -1225,7 +1230,8 @@ def _write_launcher(root):
 
 def cmd_launcher(args):
     _write_launcher(project_root())
-    print(f"  {LAUNCHER}: double-click in Finder to serve this project")
+    shell = "Explorer" if os.name == "nt" else "Finder"
+    print(f"  {LAUNCHER}: double-click in {shell} to serve this project")
 
 
 def main(argv=None):

@@ -482,7 +482,7 @@ def test_the_first_part_brings_the_launcher(tmp_path, monkeypatch):
     """Project birth is the only moment it appears on its own; deleting it sticks."""
     monkeypatch.chdir(tmp_path)
     cli.main(["new", "one"])
-    launcher = tmp_path / "viewer.command"
+    launcher = tmp_path / cli.LAUNCHER
     assert launcher.exists()
     launcher.unlink()
     cli.main(["new", "two"])
@@ -490,17 +490,22 @@ def test_the_first_part_brings_the_launcher(tmp_path, monkeypatch):
 
 
 def test_launcher_is_an_executable_that_runs_dev(tmp_path, monkeypatch):
-    """Double-clickable from Finder: executable, login shell, lands on `nurb dev --open`."""
+    """Double-clickable from the file manager, landing on `nurb dev --open`:
+    a login zsh script on macOS, a .bat on Windows."""
     import os
 
     (tmp_path / "parts").mkdir()
     monkeypatch.chdir(tmp_path)
     cli.main(["launcher"])
-    file = tmp_path / "viewer.command"
+    file = tmp_path / cli.LAUNCHER
     text = file.read_text()
-    assert text.startswith("#!/bin/zsh -l\n")
+    if os.name == "nt":
+        assert file.suffix == ".bat"
+        assert text.startswith("@echo off\n")
+    else:
+        assert text.startswith("#!/bin/zsh -l\n")
+        assert os.access(file, os.X_OK)
     assert "nurb dev --open" in text
-    assert os.access(file, os.X_OK)
 
 
 def test_export_reads_the_projects_formats(tmp_path, monkeypatch):

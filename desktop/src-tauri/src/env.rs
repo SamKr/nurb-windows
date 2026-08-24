@@ -94,10 +94,29 @@ impl Launcher {
     /// PATH for adapter processes. Agents run `nurb build` and friends while
     /// they work, and on an end-user machine the only nurb (and node) anywhere
     /// is the provisioned one, so their shells must see it. Checkout mode
-    /// inherits the dev machine's PATH untouched.
+    /// inherits the dev machine's PATH untouched, except on Windows, where
+    /// inheriting it untouched is a trap: cargo runs the app with its build
+    /// output directory first on PATH (so the binary finds its DLLs), and that
+    /// directory contains nurb.exe, the app itself. An agent typing `nurb`
+    /// there opens a second app window instead of running the CLI, and reads
+    /// the first window's console log back as the command's output. So Windows
+    /// dev builds drop the app's own directory and lead with the checkout
+    /// venv's Scripts, which holds the real nurb this repo builds.
     pub fn adapter_path(&self) -> Option<String> {
         match self {
-            Self::Checkout { .. } => None,
+            Self::Checkout { repo } => {
+                if !cfg!(windows) {
+                    return None;
+                }
+                let own = std::env::current_exe()
+                    .ok()
+                    .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf));
+                Some(checkout_adapter_path(
+                    repo,
+                    own.as_deref(),
+                    &std::env::var_os("PATH").unwrap_or_default(),
+                ))
+            }
             Self::Provisioned { paths } => {
                 // Windows keeps console binaries in the venv's Scripts and at
                 // the Node install's root; POSIX keeps both under bin/.
@@ -280,6 +299,26 @@ impl Paths {
     }
 }
 
+/// The agent PATH for a Windows dev build: the checkout venv's Scripts first
+/// (when it exists), then the inherited PATH minus the app's own directory
+/// and its deps sibling, which cargo injected and which hold the app binary
+/// under the CLI's name. See adapter_path above for the failure this stops.
+fn checkout_adapter_path(
+    repo: &std::path::Path,
+    own: Option<&std::path::Path>,
+    inherited: &std::ffi::OsStr,
+) -> String {
+    let venv = repo.join(".venv").join("Scripts");
+    let kept = std::env::split_paths(inherited).filter(|dir| match own {
+        Some(own) => *dir != *own && *dir != own.join("deps"),
+        None => true,
+    });
+    let entries = venv.is_dir().then_some(venv).into_iter().chain(kept);
+    std::env::join_paths(entries)
+        .map(|joined| joined.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| inherited.to_string_lossy().into_owned())
+}
+
 /// The JS file an installed npm package's bin table names, which is the file
 /// its .bin shims run. `bin` is either a map (name -> path) or, for a package
 /// with a single entry named after itself, a bare string. Only consulted on
@@ -292,6 +331,53 @@ fn js_entry(package_root: &std::path::Path, bin: &str) -> Option<PathBuf> {
         table => table.get(bin)?.as_str()?,
     };
     Some(package_root.join(relative))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::checkout_adapter_path;
+    use std::path::PathBuf;
+
+    /// The doorbell incident: `nurb` in an agent's shell resolved to the
+    /// app's own build output and opened a second app window per call. The
+    /// dev PATH must drop cargo's injected directories and lead with the
+    /// checkout venv, where the real CLI lives.
+    #[test]
+    fn a_dev_agents_path_leads_with_the_venv_and_omits_the_apps_own_dir() {
+        let root = std::env::temp_dir().join(format!("nurb-adapter-path-{}", std::process::id()));
+        let repo = root.join("checkout");
+        let venv = repo.join(".venv").join("Scripts");
+        std::fs::create_dir_all(&venv).unwrap();
+        let own = root.join("target").join("debug");
+        let tools = root.join("tools");
+        let inherited =
+            std::env::join_paths([own.clone(), tools.clone(), own.join("deps")]).unwrap();
+
+        let path = checkout_adapter_path(&repo, Some(&own), &inherited);
+
+        let dirs: Vec<PathBuf> = std::env::split_paths(&path).collect();
+        assert_eq!(dirs, [venv, tools]);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// Without a venv (a checkout that has never built), the PATH still
+    /// drops the app's directory rather than gaining a dead entry.
+    #[test]
+    fn a_missing_venv_is_not_put_on_the_path() {
+        let root =
+            std::env::temp_dir().join(format!("nurb-adapter-path-bare-{}", std::process::id()));
+        let repo = root.join("checkout");
+        let own = root.join("target").join("debug");
+        let tools = root.join("tools");
+        std::fs::create_dir_all(&tools).unwrap();
+        let inherited = std::env::join_paths([own.clone(), tools.clone()]).unwrap();
+
+        let path = checkout_adapter_path(&repo, Some(&own), &inherited);
+
+        let dirs: Vec<PathBuf> = std::env::split_paths(&path).collect();
+        assert_eq!(dirs, [tools]);
+        std::fs::remove_dir_all(root).ok();
+    }
 }
 
 /// The bundled uv sidecar: Tauri strips the target-triple suffix and places
