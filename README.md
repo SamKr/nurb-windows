@@ -1,10 +1,33 @@
 # nurb-windows
 
-**Work in progress. Nothing here is released, and none of it should be installed from this repo yet.**
+**Work in progress: the app is fully working on Windows, but nothing is released yet. There are no signed builds, no installer downloads, and no update feed, so build it yourself from this repo for now.**
 
-This is the Windows port of [nurb](https://github.com/Shpigford/nurb), maintained as a fork that tracks upstream. If you want nurb today, go there: macOS and Linux users are served by the upstream project, and this fork exists only to bring the desktop app and its distribution to Windows. Everything below this note is upstream's own README and still describes nurb itself.
+This is the Windows port of [nurb](https://github.com/Shpigford/nurb), maintained as a fork that tracks upstream. macOS and Linux users are served by the upstream project; this fork exists to bring the desktop app and its distribution to Windows. Everything below this note is upstream's own README and still describes nurb itself.
 
-Current state: the desktop app compiles, its test suites pass, and it produces a working (unsigned) NSIS installer, all verified on Windows CI. The Python engine's own suite still has a handful of Windows failures being worked through, there are no signed builds, no installer downloads, and no update feed yet. The platform work is kept behind `cfg(windows)` so upstream merges stay clean. One deliberate difference: agents on Windows run without an OS sandbox for now, so the app asks before every agent action instead of auto-approving the way the Seatbelt-sandboxed macOS app safely can.
+## Current state
+
+The full application runs on Windows: the desktop shell, agent chat (Claude and friends, real parts designed end to end), the live viewer, the engine and its printability checks, slicing, and export. The [windows CI workflow](.github/workflows/windows.yml) proves it on every push: the complete engine suite (560+ tests) and the desktop build with both its test suites run green on `windows-latest`. The platform work is kept behind `cfg(windows)` so upstream merges stay clean. One deliberate difference: agents on Windows run without an OS sandbox for now, so the app asks before every agent action instead of auto-approving the way the Seatbelt-sandboxed macOS app safely can.
+
+## Running it
+
+Prerequisites, each a one-time install: [Node](https://nodejs.org) (LTS), [Rust](https://rustup.rs), and [uv](https://docs.astral.sh/uv). Then, from a clone of this repo:
+
+```powershell
+.\dev.ps1     # run the app in development mode (first run compiles for a few minutes)
+.\build.ps1   # build the release app and its NSIS installer, prints where they landed
+```
+
+The installer that `build.ps1` produces is unsigned, so SmartScreen will warn the first time; that is expected until signed releases exist.
+
+## Slicers
+
+Beyond upstream's OrcaSlicer and Bambu Studio, this fork also supports Flash Studio, Flashforge's Orca fork, discovered from its standard install location. The Flashforge Adventurer 5M and 5M Pro are in the shipped printer profiles. To set a printer once for the whole machine instead of per project, write it to `~/.config/nurb/config.toml`:
+
+```toml
+profile = "flashforge_ad5m_pro"
+```
+
+Any project without its own `printer.toml` then checks, slices, and exports for that machine.
 
 # nurb
 
