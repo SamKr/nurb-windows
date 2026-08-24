@@ -58,6 +58,14 @@ slicer = "Prusa MINI"
 bed = [360.0, 360.0, 360.0]
 slicer = "Prusa XL"
 
+[flashforge_ad5m]
+bed = [220.0, 220.0, 220.0]
+slicer = "Flashforge Adventurer 5M"
+
+[flashforge_ad5m_pro]
+bed = [220.0, 220.0, 220.0]
+slicer = "Flashforge Adventurer 5M Pro"
+
 [ender_3_v3]
 bed = [220.0, 220.0, 250.0]
 slicer = "Creality Ender-3 V3"

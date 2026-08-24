@@ -341,6 +341,19 @@ def test_a_number_that_is_not_there_stays_none(tmp_path):
     assert slicing._predicted(tmp_path) == (None, None)
 
 
+def test_flash_studios_prusa_era_phrasing_is_read(tmp_path):
+    """Orca-Flashforge writes no result.json and keeps the older header dialect,
+    captured verbatim from a real Flash Studio slice."""
+    (tmp_path / "plate_1.gcode").write_text(
+        "; estimated printing time (normal mode) = 6m 34s\n"
+        "; filament used [mm] = 733.67\n"
+        "; total filament used [g] = 2.19\n"
+    )
+    seconds, grams = slicing._predicted(tmp_path)
+    assert seconds == 394
+    assert grams == pytest.approx(2.19)
+
+
 @pytest.mark.parametrize(
     "seconds,said", [(None, "unknown"), (0, "unknown"), (90, "1m"), (1668, "27m"), (3852, "1h 04m")]
 )
@@ -426,6 +439,68 @@ def test_a_bambu_studio_install_folder_keeps_its_space(tmp_path, monkeypatch):
     monkeypatch.delenv("LOCALAPPDATA", raising=False)
     monkeypatch.setenv("PATH", str(tmp_path))
     assert slicing.app(search=("BambuStudio",)) == exe
+
+
+def test_flash_studio_installs_under_its_makers_folder(tmp_path, monkeypatch):
+    """Flashforge's Orca fork: the folder names the maker, the exe keeps a space."""
+    exe = tmp_path / "Flashforge" / "Flash Studio Desktop" / "flash studio.exe"
+    exe.parent.mkdir(parents=True)
+    exe.write_bytes(b"MZ")
+    profiles = exe.parent / "resources" / "profiles"
+    profiles.mkdir(parents=True)
+    monkeypatch.setenv("ProgramFiles", str(tmp_path))
+    monkeypatch.delenv("ProgramFiles(x86)", raising=False)
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    monkeypatch.delenv("APPDATA", raising=False)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    found = slicing.app(search=("FlashStudio",))
+    assert found == exe
+    assert slicing.label(found) == "FlashStudio"
+    assert slicing.vendors(found) == profiles
+
+
+def test_a_vendors_capitalized_nozzle_still_names_the_machine(tmp_path):
+    """Orca writes "0.4 nozzle", Flash Studio "0.4 Nozzle"; both must resolve."""
+    tree = tmp_path / "profiles" / "Flashforge" / "machine"
+    tree.mkdir(parents=True)
+    profile = tree / "Flashforge Adventurer 5M Pro 0.4 Nozzle.json"
+    profile.write_text("{}", encoding="utf-8")
+    assert slicing.machine(tmp_path / "profiles", "Flashforge Adventurer 5M Pro") == profile
+
+
+def test_a_filament_listing_no_printers_fits_all_of_them(tmp_path):
+    """Orca's empty-list rule, which Flash Studio's PLA Basic relies on. Two
+    profiles must stay out: a compatibility condition is an expression this
+    module cannot evaluate, and an "@"-scoped name with no metadata is the
+    vendor scoping by filename (the 0.25-nozzle variant must never slice for a
+    0.4 machine)."""
+    folder = tmp_path / "filament"
+    folder.mkdir()
+    fits_all = folder / "Flashforge PLA Basic.json"
+    fits_all.write_text(
+        json.dumps({"instantiation": "true", "name": "Flashforge PLA Basic"}),
+        encoding="utf-8",
+    )
+    (folder / "Flashforge PLA Basic @FF AD5M 0.25 nozzle.json").write_text(
+        json.dumps({"instantiation": "true"}), encoding="utf-8"
+    )
+    (folder / "Conditional PLA Basic.json").write_text(
+        json.dumps(
+            {
+                "instantiation": "true",
+                "compatible_printers_condition": "nozzle_diameter[0]==0.4",
+            }
+        ),
+        encoding="utf-8",
+    )
+    found = slicing._compatible(
+        folder,
+        "Flashforge Adventurer 5M Pro 0.4 Nozzle",
+        ["PLA Basic"],
+        fallback=False,
+        whole=True,
+    )
+    assert found == fits_all
 
 
 def test_a_print_over_a_day_keeps_its_days():

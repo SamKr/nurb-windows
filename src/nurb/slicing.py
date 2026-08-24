@@ -26,16 +26,27 @@ import subprocess
 
 # Slicers that share the one CLI grammar this module speaks: `--load-settings`,
 # `--load-filaments`, `--slice`, `--outputdir`, and a bundled tree of vendor profiles
-# under Resources/profiles. They are a fork and its parent, which is why one adapter
-# covers both. Orca leads because it carries profiles for more machines.
-SLICERS = ("OrcaSlicer", "BambuStudio")
+# under Resources/profiles. They are forks and their parent, which is why one adapter
+# covers them all. Orca leads because it carries profiles for more machines; Flash
+# Studio (Flashforge's Orca fork, internally "Orca-Flashforge") comes last because it
+# only carries Flashforge machines.
+SLICERS = ("OrcaSlicer", "BambuStudio", "FlashStudio")
 COMMANDS = {
     "OrcaSlicer": ("OrcaSlicer", "orcaslicer", "orca-slicer"),
     "BambuStudio": ("BambuStudio", "bambustudio", "bambu-studio"),
+    "FlashStudio": ("flash studio", "FlashStudio", "flash-studio"),
 }
 FLATPAKS = {
     "OrcaSlicer": "com.orcaslicer.OrcaSlicer",
     "BambuStudio": "com.bambulab.BambuStudio",
+}
+# Where an installer's folder name is not the app name: Flash Studio installs
+# under its maker's folder, and writes user profiles under its internal name.
+WINDOWS_DIRS = {
+    "FlashStudio": ("Flashforge/Flash Studio Desktop",),
+}
+CONFIG_DIRS = {
+    "FlashStudio": "Orca-Flashforge",
 }
 
 # What each shipped profile is called in a slicer's own vendor bundle. It lives beside
@@ -105,7 +116,7 @@ def app(search=None):
         # with a space) under Program Files or the user's local Programs, with
         # the hyphenated command name as the executable.
         for root in _windows_roots():
-            for folder in dict.fromkeys((name, _spaced(name))):
+            for folder in WINDOWS_DIRS.get(name, tuple(dict.fromkeys((name, _spaced(name))))):
                 for command in COMMANDS.get(name, (name, name.lower())):
                     exe = root / folder / f"{command}.exe"
                     if exe.is_file():
@@ -169,7 +180,12 @@ def label(exe):
 def _flavor(exe):
     """The application family, from a path or Flatpak command."""
     said = " ".join(str(v) for v in exe) if isinstance(exe, tuple) else str(exe)
-    return "OrcaSlicer" if "orca" in said.lower() else "BambuStudio"
+    lower = said.lower()
+    # Flash first: its install path says "Flashforge", never "orca", and its
+    # internal name "Orca-Flashforge" says both.
+    if "flash" in lower:
+        return "FlashStudio"
+    return "OrcaSlicer" if "orca" in lower else "BambuStudio"
 
 
 def _resource_names(flavor):
@@ -203,14 +219,13 @@ def _user_profile_roots(flavor):
     """Profile caches written after the slicer has run once."""
     home = pathlib.Path.home()
     config = pathlib.Path(os.environ.get("XDG_CONFIG_HOME", home / ".config"))
-    app_id = FLATPAKS[flavor]
-    roots = [
-        config / flavor / "system",
-        home / ".var" / "app" / app_id / "config" / flavor / "system",
-    ]
+    name = CONFIG_DIRS.get(flavor, flavor)
+    roots = [config / name / "system"]
+    if app_id := FLATPAKS.get(flavor):
+        roots.append(home / ".var" / "app" / app_id / "config" / name / "system")
     # Windows slicers keep their per-user tree under %APPDATA%.
     if appdata := os.environ.get("APPDATA"):
-        roots.insert(0, pathlib.Path(appdata) / flavor / "system")
+        roots.insert(0, pathlib.Path(appdata) / name / "system")
     return roots
 
 
@@ -222,17 +237,27 @@ def _readable(path):
 
 
 def machine(profiles, name, nozzle=NOZZLE):
-    """The vendor profile for a machine, by the name a slicer knows it under."""
-    want = f"{name} {nozzle} nozzle"
-    for candidate in sorted(profiles.glob(f"*/machine/{want}.json")):
-        return candidate
-    all_machines = sorted(profiles.glob("*/machine/* nozzle.json"))
-    prefix, suffix = f"{name} ", " nozzle"
+    """The vendor profile for a machine, by the name a slicer knows it under.
+
+    Matched case-insensitively on the whole stem: Orca writes "0.4 nozzle",
+    Flash Studio writes "0.4 Nozzle", and a vendor's capitalization choice
+    should never decide whether a machine exists.
+    """
+    want = f"{name} {nozzle} nozzle".lower()
+    all_machines = sorted(
+        path
+        for path in profiles.glob("*/machine/*.json")
+        if path.stem.lower().endswith(" nozzle")
+    )
+    for candidate in all_machines:
+        if candidate.stem.lower() == want:
+            return candidate
+    prefix, suffix = f"{name} ".lower(), " nozzle"
     nozzles = sorted(
         {
             path.stem[len(prefix) : -len(suffix)]
             for path in all_machines
-            if path.stem.startswith(prefix) and path.stem.endswith(suffix)
+            if path.stem.lower().startswith(prefix)
         }
     )
     if nozzles:
@@ -269,7 +294,18 @@ def _compatible(folder, printer, prefer, fallback=True, whole=False):
         data = _readable(path)
         if data.get("instantiation") != "true":
             continue
-        if printer in data.get("compatible_printers", []):
+        listed = data.get("compatible_printers") or []
+        if listed:
+            fits = printer in listed
+        else:
+            # Orca's rule for an empty list: no condition means every printer
+            # (Flash Studio's PLA Basic ships this way). Two honest refusals:
+            # a compatibility condition is an expression this module does not
+            # evaluate, and an "@"-scoped stem ("PLA Basic @FF AD5M 0.25
+            # nozzle" with no metadata at all) is the vendor scoping by
+            # filename, which only their own UI decodes.
+            fits = not data.get("compatible_printers_condition") and "@" not in path.stem
+        if fits:
             usable.append(path)
     if not usable:
         return None
@@ -508,11 +544,31 @@ def _why(done, out_dir):
     return tail[-1] if tail else f"exit code {done.returncode}"
 
 
-TIME = re.compile(r"total estimated time: ([^;\n]+)")
-LENGTH = re.compile(r"total filament length \[mm\] ?: ?([\d.]+)")
-WEIGHT = re.compile(r"total filament weight \[g\] ?: ?([\d.]+)")
-DENSITY = re.compile(r"filament_density[ =:]+([\d.]+)")
-DIAMETER = re.compile(r"filament_diameter[ =:]+([\d.]+)")
+# Each figure as a list of dialects: Orca and Bambu write the first phrasing,
+# Flash Studio (an older Orca fork) kept the Prusa-era second one. The first
+# pattern that matches answers.
+TIME = [
+    re.compile(r"total estimated time: ([^;\n]+)"),
+    re.compile(r"estimated printing time \(normal mode\) = ([^;\n]+)"),
+]
+LENGTH = [
+    re.compile(r"total filament length \[mm\] ?: ?([\d.]+)"),
+    re.compile(r"filament used \[mm\] = ([\d.]+)"),
+]
+WEIGHT = [
+    re.compile(r"total filament weight \[g\] ?: ?([\d.]+)"),
+    re.compile(r"total filament used \[g\] = ([\d.]+)"),
+]
+DENSITY = [re.compile(r"filament_density[ =:]+([\d.]+)")]
+DIAMETER = [re.compile(r"filament_diameter[ =:]+([\d.]+)")]
+
+
+def _said(patterns, text):
+    """The first dialect that matches, or None."""
+    for pattern in patterns:
+        if match := pattern.search(text):
+            return match[1]
+    return None
 
 
 def _predicted(out_dir):
@@ -539,22 +595,22 @@ def _predicted(out_dir):
         with gcode.open("r", encoding="utf-8", errors="replace") as fh:
             head = fh.read(4096) + _tail(gcode)
     if seconds is None:
-        said = TIME.search(head)
-        seconds = _clock(said[1]) if said else None
+        said = _said(TIME, head)
+        seconds = _clock(said) if said else None
     return seconds, _grams(head)
 
 
 def _grams(head):
     """What the plate weighs, from the header's own figure or from its parts."""
-    said = WEIGHT.search(head)
-    if said and float(said[1]) > 0:
-        return float(said[1])
-    length, density, diameter = (r.search(head) for r in (LENGTH, DENSITY, DIAMETER))
+    said = _said(WEIGHT, head)
+    if said and float(said) > 0:
+        return float(said)
+    length, density, diameter = (_said(r, head) for r in (LENGTH, DENSITY, DIAMETER))
     if not (length and density and diameter):
         return None
-    radius = float(diameter[1]) / 2
-    volume = float(length[1]) * math.pi * radius * radius  # mm3
-    return volume / 1000 * float(density[1])
+    radius = float(diameter) / 2
+    volume = float(length) * math.pi * radius * radius  # mm3
+    return volume / 1000 * float(density)
 
 
 def _tail(gcode, size=8192):
