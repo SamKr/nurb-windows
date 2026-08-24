@@ -164,16 +164,20 @@ fn write_stamp(paths: &Paths, stamp: &Stamp) -> Result<(), String> {
 /// A venv that matches the bundled wheel and lock, and whose interpreter
 /// actually imports nurb: a stamp alone lies after a half-finished install.
 fn parts_ok(paths: &Paths, res: &Resources, stamp: &Stamp) -> bool {
-    stamp.lock == res.lock_hash
-        && stamp.wheel == res.wheel_hash
-        && Command::new(paths.venv_python())
-            .args(["-c", "import nurb"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false)
+    if stamp.lock != res.lock_hash || stamp.wheel != res.wheel_hash {
+        return false;
+    }
+    let mut probe = Command::new(paths.venv_python());
+    probe
+        .args(["-c", "import nurb"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    crate::proc::setup(&mut probe);
+    probe
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
 
 fn chat_ok(paths: &Paths, res: &Resources, stamp: &Stamp) -> bool {

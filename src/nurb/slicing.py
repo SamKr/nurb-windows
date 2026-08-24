@@ -101,6 +101,15 @@ def app(search=None):
         bundle = pathlib.Path(f"/Applications/{name}.app/Contents/MacOS/{name}")
         if bundle.is_file():
             return bundle
+        # Windows installers land in a folder named after the app (sometimes
+        # with a space) under Program Files or the user's local Programs, with
+        # the hyphenated command name as the executable.
+        for root in _windows_roots():
+            for folder in dict.fromkeys((name, _spaced(name))):
+                for command in COMMANDS.get(name, (name, name.lower())):
+                    exe = root / folder / f"{command}.exe"
+                    if exe.is_file():
+                        return exe
         for command in COMMANDS.get(name, (name, name.lower())):
             found = shutil.which(command)
             if found:
@@ -167,6 +176,19 @@ def _resource_names(flavor):
     return (flavor, flavor.lower(), flavor.replace("Slicer", "-slicer").replace("Studio", "-studio").lower())
 
 
+def _windows_roots():
+    """Windows install roots, empty elsewhere: these env vars only exist there."""
+    named = [os.environ.get("ProgramFiles"), os.environ.get("ProgramFiles(x86)")]
+    if local := os.environ.get("LOCALAPPDATA"):
+        named.append(os.path.join(local, "Programs"))
+    return tuple(pathlib.Path(root) for root in named if root)
+
+
+def _spaced(name):
+    """The folder spelling installers prefer: 'BambuStudio' -> 'Bambu Studio'."""
+    return re.sub(r"(?<=[a-z])(?=[A-Z])", " ", name)
+
+
 def _flatpak_roots(app_id):
     if not app_id:
         return ()
@@ -178,14 +200,18 @@ def _flatpak_roots(app_id):
 
 
 def _user_profile_roots(flavor):
-    """Profile caches written after an AppImage or Flatpak has run once."""
+    """Profile caches written after the slicer has run once."""
     home = pathlib.Path.home()
     config = pathlib.Path(os.environ.get("XDG_CONFIG_HOME", home / ".config"))
     app_id = FLATPAKS[flavor]
-    return [
+    roots = [
         config / flavor / "system",
         home / ".var" / "app" / app_id / "config" / flavor / "system",
     ]
+    # Windows slicers keep their per-user tree under %APPDATA%.
+    if appdata := os.environ.get("APPDATA"):
+        roots.insert(0, pathlib.Path(appdata) / flavor / "system")
+    return roots
 
 
 def _readable(path):

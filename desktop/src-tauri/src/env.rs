@@ -140,11 +140,19 @@ impl Launcher {
             return kind.native_bin().is_some();
         }
         match self {
-            Self::Checkout { .. } => Command::new("npx")
-                .arg("--version")
-                .output()
-                .map(|out| out.status.success())
-                .unwrap_or(false),
+            Self::Checkout { .. } => {
+                // The same .cmd shim rule as adapter() above: a bare "npx"
+                // never resolves on Windows, which read as "no agents" in the
+                // rail of every dev build.
+                let npx = if cfg!(windows) { "npx.cmd" } else { "npx" };
+                let mut probe = Command::new(npx);
+                probe.arg("--version");
+                crate::proc::setup(&mut probe);
+                probe
+                    .output()
+                    .map(|out| out.status.success())
+                    .unwrap_or(false)
+            }
             Self::Provisioned { paths } => {
                 paths.node_bin().is_file() && paths.adapter_script(kind).is_file()
             }

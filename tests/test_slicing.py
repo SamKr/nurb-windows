@@ -7,6 +7,7 @@ two numbers from the files a slicer leaves behind.
 """
 
 import json
+import os
 import pathlib
 from types import SimpleNamespace
 
@@ -385,6 +386,7 @@ def test_no_slicer_installed_is_none_not_a_crash():
     assert slicing.app(search=("NoSuchSlicerExistsHere",)) is None
 
 
+@pytest.mark.skipif(os.name == "nt", reason="an extensionless shebang command is a POSIX shape")
 def test_a_hyphenated_linux_command_and_share_tree_are_found(tmp_path, monkeypatch):
     exe = tmp_path / "usr" / "bin" / "orca-slicer"
     exe.parent.mkdir(parents=True)
@@ -396,6 +398,34 @@ def test_a_hyphenated_linux_command_and_share_tree_are_found(tmp_path, monkeypat
     found = slicing.app(search=("OrcaSlicer",))
     assert found == exe
     assert slicing.vendors(found) == profiles
+
+
+def test_a_windows_program_files_install_and_resources_are_found(tmp_path, monkeypatch):
+    """Discovery reads the Windows roots from env vars, so any OS can stage this
+    layout; on real Windows the same vars are simply the real ones."""
+    exe = tmp_path / "Program Files" / "OrcaSlicer" / "orca-slicer.exe"
+    exe.parent.mkdir(parents=True)
+    exe.write_bytes(b"MZ")
+    profiles = exe.parent / "resources" / "profiles"
+    profiles.mkdir(parents=True)
+    monkeypatch.setenv("ProgramFiles", str(tmp_path / "Program Files"))
+    monkeypatch.delenv("ProgramFiles(x86)", raising=False)
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    found = slicing.app(search=("OrcaSlicer",))
+    assert found == exe
+    assert slicing.vendors(found) == profiles
+
+
+def test_a_bambu_studio_install_folder_keeps_its_space(tmp_path, monkeypatch):
+    exe = tmp_path / "Bambu Studio" / "bambu-studio.exe"
+    exe.parent.mkdir(parents=True)
+    exe.write_bytes(b"MZ")
+    monkeypatch.setenv("ProgramFiles", str(tmp_path))
+    monkeypatch.delenv("ProgramFiles(x86)", raising=False)
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    assert slicing.app(search=("BambuStudio",)) == exe
 
 
 def test_a_print_over_a_day_keeps_its_days():

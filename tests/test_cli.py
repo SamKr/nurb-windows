@@ -754,14 +754,20 @@ def test_desktop_app_version_is_the_package_version():
 
 def test_skill_sync_rewrites_a_stale_copy_and_writes_the_shared_one_once(tmp_path, monkeypatch, capsys):
     """skills.sh symlinks every harness at one universal copy; sync must not report it twice."""
+    # Both spellings of home: Path.home() reads HOME on POSIX and USERPROFILE
+    # on Windows.
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     packaged = (pathlib.Path(cli.__file__).parent / "skill.md").read_text(encoding="utf-8")
     universal = tmp_path / ".agents" / "skills" / "nurb"
     universal.mkdir(parents=True)
     (universal / "SKILL.md").write_text("stale", encoding="utf-8")
     claude = tmp_path / ".claude" / "skills" / "nurb"
     claude.mkdir(parents=True)
-    (claude / "SKILL.md").symlink_to(universal / "SKILL.md")
+    try:
+        (claude / "SKILL.md").symlink_to(universal / "SKILL.md")
+    except OSError:
+        pytest.skip("symlink creation needs Developer Mode or admin on Windows")
     cli.main(["skill", "--sync"])
     out = capsys.readouterr().out
     assert (universal / "SKILL.md").read_text(encoding="utf-8") == packaged
@@ -772,6 +778,7 @@ def test_skill_sync_rewrites_a_stale_copy_and_writes_the_shared_one_once(tmp_pat
 
 def test_skill_sync_leaves_a_current_copy_alone(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     packaged = (pathlib.Path(cli.__file__).parent / "skill.md").read_text(encoding="utf-8")
     claude = tmp_path / ".claude" / "skills" / "nurb"
     claude.mkdir(parents=True)
@@ -782,6 +789,7 @@ def test_skill_sync_leaves_a_current_copy_alone(tmp_path, monkeypatch, capsys):
 
 def test_skill_sync_with_nothing_installed_points_at_the_installer(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     cli.main(["skill", "--sync"])
     assert "npx skills add shpigford/nurb --skill nurb" in capsys.readouterr().out
 

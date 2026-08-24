@@ -796,7 +796,8 @@ def cmd_skill(args):
         if real.read_text(encoding="utf-8") != skill:
             real.write_text(skill, encoding="utf-8")
             state = "updated"
-        print(f"  ~/{target.relative_to(home)}: {state}")
+        # as_posix so the tilde notation stays one style on every OS.
+        print(f"  ~/{target.relative_to(home).as_posix()}: {state}")
     if not found:
         print("  no installed skill found. install one: npx skills add shpigford/nurb --skill nurb")
 
@@ -1099,10 +1100,15 @@ DEFAULT_FORMATS = ("3mf",)
 
 
 def _is_free(port):
+    import os
     import socket
 
     with socket.socket() as probe:
-        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # SO_REUSEADDR skips TIME_WAIT ghosts on POSIX. On Windows the same
+        # flag instead permits binding over a port that is in active use, so
+        # every running server would read as free; Windows probes without it.
+        if os.name != "nt":
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             probe.bind(("127.0.0.1", port))
             return True

@@ -4,6 +4,7 @@ import asyncio
 import io
 import json
 import pathlib
+import re
 import threading
 import time
 from types import SimpleNamespace
@@ -365,7 +366,10 @@ def test_export_confines_a_variant_filename_to_build(tmp_path):
     saved = pathlib.Path(json.loads(resp.body)["path"])
     assert resp.status_code == 200
     assert saved.parent == tmp_path / "build"
-    assert saved.name == f"{str(escaped).replace('/', '_').strip('._')}.stl"
+    # Confinement means no path structure survives into the name: separators
+    # (and on Windows the drive colon) all flatten to underscores.
+    flattened = re.sub(r"[^A-Za-z0-9._-]", "_", str(escaped)).strip("._")
+    assert saved.name == f"{flattened}.stl"
     assert saved.is_file()
     assert not escaped.exists()
 
@@ -484,9 +488,13 @@ def test_upgrade_declines_outside_a_uv_tool_install(tmp_path):
 
 
 def test_upgrade_failure_reports_instead_of_restarting(tmp_path, monkeypatch):
+    import sys
+
     from nurb import server as server_mod
 
-    monkeypatch.setattr(server_mod, "_upgrade_command", lambda: ["false"])
+    # The interpreter as a portable `false`: Windows has no coreutils.
+    failing = [sys.executable, "-c", "import sys; sys.exit(1)"]
+    monkeypatch.setattr(server_mod, "_upgrade_command", lambda: failing)
     execs = []
     monkeypatch.setattr("os.execv", lambda path, argv: execs.append(path))
     server = Server(tmp_path)
@@ -503,7 +511,8 @@ def test_upgrade_execs_the_same_argv_after_success(tmp_path, monkeypatch):
 
     from nurb import server as server_mod
 
-    monkeypatch.setattr(server_mod, "_upgrade_command", lambda: ["true"])
+    # The interpreter as a portable `true`: Windows has no coreutils.
+    monkeypatch.setattr(server_mod, "_upgrade_command", lambda: [sys.executable, "-c", ""])
     execs = []
     monkeypatch.setattr("os.execv", lambda path, argv: execs.append((path, argv)))
     server = Server(tmp_path)
@@ -683,7 +692,10 @@ def test_section_reaims_after_a_new_parts_camera_is_restored():
 
 
 def _install_skill(tmp_path, monkeypatch, text):
+    # Both spellings of home: Path.home() reads HOME on POSIX and USERPROFILE
+    # on Windows.
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     target = tmp_path / ".claude" / "skills" / "nurb" / "SKILL.md"
     target.parent.mkdir(parents=True)
     target.write_text(text, encoding="utf-8")
@@ -732,6 +744,7 @@ def test_skill_nudge_stays_quiet_with_nothing_installed(tmp_path, monkeypatch, c
     from nurb import server as server_mod
 
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     server_mod._skill_nudge()
     assert capsys.readouterr().out == ""
 
